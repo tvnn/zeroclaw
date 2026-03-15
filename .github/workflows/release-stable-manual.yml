@@ -24,7 +24,7 @@ env:
 jobs:
   validate:
     name: Validate Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.check.outputs.tag }}
     steps:
@@ -156,30 +156,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: zeroclaw
             ext: tar.gz
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact: zeroclaw
-            ext: tar.gz
-            cross_compiler: gcc-aarch64-linux-gnu
-            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
-            linker: aarch64-linux-gnu-gcc
-          - os: macos-14
-            target: aarch64-apple-darwin
-            artifact: zeroclaw
-            ext: tar.gz
-          - os: ubuntu-latest
-            target: aarch64-linux-android
-            artifact: zeroclaw
-            ext: tar.gz
-            ndk: true
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: zeroclaw.exe
-            ext: zip
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -193,23 +173,10 @@ jobs:
         with:
           name: web-dist
           path: web/dist/
-
-      - name: Install cross compiler
-        if: matrix.cross_compiler
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.cross_compiler }}
-
-      - name: Setup Android NDK
-        if: matrix.ndk
-        run: echo "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
-
+          
       - name: Build release
         shell: bash
         run: |
-          if [ -n "${{ matrix.linker_env || '' }}" ] && [ -n "${{ matrix.linker || '' }}" ]; then
-            export "${{ matrix.linker_env }}=${{ matrix.linker }}"
-          fi
           cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (Unix)
@@ -217,12 +184,6 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../zeroclaw-${{ matrix.target }}.${{ matrix.ext }} ${{ matrix.artifact }}
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../zeroclaw-${{ matrix.target }}.${{ matrix.ext }} ${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -272,92 +233,10 @@ jobs:
             --notes-file release-notes.md \
             --latest
 
-  crates-io:
-    name: Publish to crates.io
-    needs: [validate, publish]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.92.0
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build web dashboard
-        run: cd web && npm ci && npm run build
-
-      - name: Clean web build artifacts
-        run: rm -rf web/node_modules web/src web/package.json web/package-lock.json web/tsconfig*.json web/vite.config.ts web/index.html
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          # Skip if this version is already on crates.io (auto-sync may have published it)
-          CRATE_NAME=$(sed -n 's/^name = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
-          if curl -sfL "https://crates.io/api/v1/crates/${CRATE_NAME}/${VERSION}" | grep -q '"version"'; then
-            echo "::notice::${CRATE_NAME}@${VERSION} already published on crates.io — skipping"
-          else
-            cargo publish --locked --allow-dirty --no-verify
-          fi
-
-  redeploy-website:
-    name: Trigger Website Redeploy
-    needs: [publish]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger website redeploy
-        env:
-          PAT: ${{ secrets.WEBSITE_REPO_PAT }}
-        run: |
-          curl -fsSL -X POST \
-            -H "Authorization: token $PAT" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/zeroclaw-labs/zeroclaw-website/dispatches \
-            -d '{"event_type":"new-release","client_payload":{"install_script_url":"https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh"}}'
-
-  docker:
-    name: Push Docker Image
-    needs: [validate, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   # ── Post-publish: only run after ALL artifacts are live ──────────────
   tweet:
     name: Tweet Release
-    needs: [validate, publish, docker, crates-io, redeploy-website]
+    needs: [validate, publish]
     uses: ./.github/workflows/tweet-release.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
