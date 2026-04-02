@@ -4,10 +4,6 @@ on:
   push:
     branches: [master]
 
-concurrency:
-  group: release-beta
-  cancel-in-progress: true
-
 permissions:
   contents: write
   packages: write
